@@ -22,13 +22,12 @@ centrifuge-python
 opencv-python>=4.1.1
 numpy
 grafana-api
-diffusers>=0.30.0
 datasets
 trl
-einops>=0.7.0
+einops
 imageio
 imageio[ffmpeg]
-peft==0.7.1
+peft>=0.15.0
 scipy
 bitsandbytes>=0.41.3
 langchain
