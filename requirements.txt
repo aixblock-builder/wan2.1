@@ -1,7 +1,6 @@
 transformers==4.46.2
 accelerate
 safetensors
-torchvision
 prometheus-client
 aixblock-ml
 aixblock-sdk
