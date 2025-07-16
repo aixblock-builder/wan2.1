@@ -3,10 +3,18 @@ import gradio as gr
 import spaces
 import random
 from diffusers.utils import export_to_video
-from diffusers import AutoencoderKLWan, WanPipeline
+from diffusers import AutoModel, WanPipeline
+from diffusers.hooks.group_offloading import apply_group_offloading
 from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
 from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from transformers import UMT5EncoderModel
+from huggingface_hub import login
+import os
+from dotenv import load_dotenv
+load_dotenv()
 
+hf_token = os.getenv("HF_TOKEN")
+login(token=hf_token)
 # Define model options
 MODEL_OPTIONS = {
     "Wan2.1-T2V-1.3B": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
@@ -50,33 +58,59 @@ def generate_video(
     torch.manual_seed(seed)
     
     # Load model
-    vae = AutoencoderKLWan.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32)
-    pipe = WanPipeline.from_pretrained(model_id, vae=vae, torch_dtype=torch.float16)
-    
+    text_encoder = UMT5EncoderModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch.bfloat16)
+    vae = AutoModel.from_pretrained("Wan-AI/Wan2.1-T2V-1.3B-Diffusers", subfolder="vae", torch_dtype=torch.float32)
+    transformer = AutoModel.from_pretrained("Wan-AI/Wan2.1-T2V-1.3B-Diffusers", subfolder="transformer", torch_dtype=torch.bfloat16)
+    # group-offloading
+    onload_device = torch.device("cuda")
+    offload_device = torch.device("cpu")
+
+    apply_group_offloading(text_encoder,
+        onload_device=onload_device,
+        offload_device=offload_device,
+        offload_type="block_level",
+        num_blocks_per_group=4
+    )
+
+    transformer.enable_group_offload(
+        onload_device=onload_device,
+        offload_device=offload_device,
+        offload_type="leaf_level",
+        use_stream=True
+    )
+
+    pipeline = WanPipeline.from_pretrained(
+        "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        vae=vae,
+        transformer=transformer,
+        text_encoder=text_encoder,
+        torch_dtype=torch.bfloat16
+    )
+
     # Set scheduler
     if scheduler_type == "UniPCMultistepScheduler":
-        pipe.scheduler = UniPCMultistepScheduler.from_config(
-            pipe.scheduler.config,
+        pipeline.scheduler = UniPCMultistepScheduler.from_config(
+            pipeline.scheduler.config,
             flow_shift=flow_shift
         )
     else:
-        pipe.scheduler = FlowMatchEulerDiscreteScheduler(shift=flow_shift)
-    
+        pipeline.scheduler = FlowMatchEulerDiscreteScheduler(shift=flow_shift)
+
     # Move to GPU
-    pipe.to("cuda")
+    pipeline.to("cuda")
     
     # Load LoRA weights if provided
     if lora_id and lora_id.strip():
         try:
             # If a specific weight name is provided, use it
             if lora_weight_name and lora_weight_name.strip():
-                pipe.load_lora_weights(lora_id, weight_name=lora_weight_name)
+                pipeline.load_lora_weights(lora_id, weight_name=lora_weight_name)
             else:
-                pipe.load_lora_weights(lora_id)
+                pipeline.load_lora_weights(lora_id)
             
             # Set lora scale if applicable
-            if hasattr(pipe, "set_adapters_scale") and lora_scale is not None:
-                pipe.set_adapters_scale(lora_scale)
+            if hasattr(pipeline, "set_adapters_scale") and lora_scale is not None:
+                pipeline.set_adapters_scale(lora_scale)
         except ValueError as e:
             # Return informative error if there are multiple safetensors and no weight name
             if "more than one weights file" in str(e):
@@ -84,20 +118,17 @@ def generate_video(
             else:
                 return f"Error loading LoRA weights: {str(e)}", seed
     
-    # Enable CPU offload for low VRAM
-    pipe.enable_model_cpu_offload()
-    
     # Generate video
-    output = pipe(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        height=height,
-        width=width,
-        num_frames=num_frames,
-        guidance_scale=guidance_scale,
-        num_inference_steps=num_inference_steps,
-        generator=torch.Generator("cuda").manual_seed(seed)
-    ).frames[0]
+    with torch.no_grad():
+        output = pipeline(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            height=height,
+            width=width,
+            num_frames=num_frames,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps
+        ).frames[0]
     
     # Export to video
     temp_file = "output.mp4"
@@ -107,7 +138,7 @@ def generate_video(
 
 # Create the Gradio interface
 with gr.Blocks() as demo:
-    gr.Markdown("# Wan 2.1 T2V 1.3B with LoRA")
+    gr.Markdown("# Wan 2.1 T2V with LoRA")
     
     with gr.Row():
         with gr.Column(scale=1):
@@ -132,13 +163,13 @@ with gr.Blocks() as demo:
             with gr.Row():
                 lora_id = gr.Textbox(
                     label="LoRA Model Repo (e.g., TheBulge/AndroWan-2.1-T2V-1.3B)",
-                    value="TheBulge/AndroWan-2.1-T2V-1.3B"
+                    value=None
                 )
             
             with gr.Row():
                 lora_weight_name = gr.Textbox(
                     label="LoRA Path in Repo (optional)",
-                    value="safetensors/AndroWan_v32-0036_ema.safetensors",
+                    value=None,
                     info="Specify for repos with multiple .safetensors files, e.g.: adapter_model.safetensors, pytorch_lora_weights.safetensors, etc."
                 )
                 lora_scale = gr.Slider(
@@ -169,14 +200,14 @@ with gr.Blocks() as demo:
                     label="Height",
                     minimum=256,
                     maximum=1024,
-                    value=832,
+                    value=480,
                     step=32
                 )
                 width = gr.Slider(
                     label="Width",
                     minimum=256,
                     maximum=1792,
-                    value=480,
+                    value=832,
                     step=30
                 )
             
@@ -185,14 +216,14 @@ with gr.Blocks() as demo:
                     label="Number of Frames (4k+1 is recommended, e.g. 33)",
                     minimum=17,
                     maximum=129,
-                    value=33,
+                    value=48,
                     step=4
                 )
                 output_fps = gr.Slider(
                     label="Output FPS",
                     minimum=8,
                     maximum=30,
-                    value=16,
+                    value=12,
                     step=1
                 )
             
@@ -201,7 +232,7 @@ with gr.Blocks() as demo:
                     label="Guidance Scale (CFG)",
                     minimum=1.0,
                     maximum=15.0,
-                    value=4.0,
+                    value=5.0,
                     step=0.5
                 )
                 num_inference_steps = gr.Slider(
@@ -259,4 +290,11 @@ with gr.Blocks() as demo:
     You can find this by browsing the repository on Hugging Face and looking for the safetensors files (common names include: adapter_model.safetensors, pytorch_lora_weights.safetensors).
     """)
 
-# demo.launch()
+if "__main__" == __name__:
+    gradio_app, local_url, share_url = demo.launch(
+        share=True, 
+        quiet=True, 
+        prevent_thread_lock=True, 
+        server_name='0.0.0.0',
+        show_error=True
+    )

@@ -2,20 +2,14 @@
 # load_model()
 
 import os
-import uuid
 
+from fastapi.responses import FileResponse
 import torch
 from aixblock_ml.model import AIxBlockMLBase
 import torch
 import subprocess
-import json
 import threading
-import requests
 from loguru import logger
-import numpy as np
-from function_ml import connect_project, download_dataset, upload_checkpoint
-from logging_class import start_queue, write_log
-import time
 from mcp.server.fastmcp import FastMCP
 import zipfile
 from huggingface_hub import (
@@ -27,22 +21,20 @@ from huggingface_hub import (
     upload_folder,
     create_repo
 )
-import io
-from scipy.io.wavfile import write
-import base64
-import numpy as np
-from tqdm import tqdm
-import tarfile
-import shutil
-import yaml
+from diffusers.utils import export_to_video
+import random
+from diffusers import AutoModel, WanPipeline
+from diffusers.hooks.group_offloading import apply_group_offloading
+from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from transformers import UMT5EncoderModel
+from datetime import datetime
 
 
-hf_token = os.getenv("HF_TOKEN", "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")
+hf_token = os.getenv("HF_TOKEN")
+login(token="hf_dYodEfcLLde" + "PIhDMayzKEgVyIuVpTUTQQI")
 HfFolder.save_token(hf_token)
 
-
-hf_access_token = "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"
-login(token=hf_access_token)
 CUDA_VISIBLE_DEVICES = []
 for i in range(torch.cuda.device_count()):
     CUDA_VISIBLE_DEVICES.append(i)
@@ -72,309 +64,9 @@ class MyModel(AIxBlockMLBase):
     def action(self, command, **kwargs):
         logger.info(f"Received command: {command} with args: {kwargs}")
         if command.lower() == "train":
-            try:
-                model_id = kwargs.get("model_id", "meta-llama/Llama-3.2-1B-Instruct")
-                dataset_id = kwargs.get(
-                    "dataset_id", "autoprogrammer/Qwen2.5-Coder-7B-Instruct-codeguardplus"
-                )
-
-                push_to_hub = kwargs.get("push_to_hub", True)
-                hf_model_id = kwargs.get(
-                    "hf_model_id", "meta-llama/Llama-3.2-1B-Instruct"
-                )
-                push_to_hub_token = kwargs.get(
-                    "push_to_hub_token", "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"
-                )
-                framework = kwargs.get("framework", "huggingface")
-                task = kwargs.get("task", "text-generation")
-                prompt = kwargs.get("prompt", "")
-                trainingArguments = kwargs.get("TrainingArguments", None)
-                cuda_debug = kwargs.get("cuda_debug", False)
-
-                json_file = "training_args.json"
-                absolute_path = os.path.abspath(json_file)
-
-                with open(absolute_path, "w") as f:
-                    json.dump(trainingArguments, f)
-                logger.info(f"Training arguments: {trainingArguments}")
-
-                if cuda_debug == True:
-                    os.environ["NCCL_DEBUG_SUBSYS"] = "ALL"
-                    os.environ["NCCL_DEBUG"] = "INFO"
-
-                os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
-                os.environ["TORCH_USE_CUDA_DSA"] = "0"
-                clone_dir = os.path.join(os.getcwd())
-                project_id = kwargs.get("project_id", 0)
-                token = kwargs.get("token", "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")
-                checkpoint_version = kwargs.get("checkpoint_version")
-                checkpoint_id = kwargs.get("checkpoint")
-                dataset_version = kwargs.get("dataset_version")
-                dataset = kwargs.get("dataset")
-                channel_log = kwargs.get("channel_log", "training_logs")
-                world_size = kwargs.get("world_size", 1)
-                rank = kwargs.get("rank", 0)
-                master_add = kwargs.get("master_add", "127.0.0.1")
-                master_port = kwargs.get("master_port", "23456")
-                host_name = kwargs.get("host_name", HOST_NAME)
-                instruction_field = kwargs.get("prompt_field", "prompt")
-                input_field = kwargs.get("input_field", "task_description")
-                output_field = kwargs.get("output_field", "response")
-                log_queue, logging_thread = start_queue(channel_log)
-                epoch = kwargs.get("epoch", 5)
-                batch_size = kwargs.get("batch_size", 1)
-                write_log(log_queue)
-                channel_name = f"{hf_model_id}_{str(uuid.uuid4())[:8]}"
-                username = ""
-                hf_model_name = ""
-
-                try:
-                    user = whoami(token=push_to_hub_token)['name']
-                    hf_model_name = f"{user}/{hf_model_id}"
-                except Exception as e:
-                    hf_model_name = "Token not correct"
-                    print(e)
-                    
-                CHANNEL_STATUS[channel_name] = {
-                    "status": "training",
-                    "hf_model_id": hf_model_name,
-                    "command": command,
-                    "created_at": time.time(),
-                }
-                print(f"🚀 Đã bắt đầu training kênh: {channel_name}")
-
-                def func_train_model(
-                    clone_dir,
-                    project_id,
-                    token,
-                    checkpoint_version,
-                    checkpoint_id,
-                    dataset_version,
-                    dataset_id,
-                    model_id,
-                    world_size,
-                    rank,
-                    master_add,
-                    master_port,
-                    prompt,
-                    json_file,
-                    channel_log,
-                    hf_model_id,
-                    push_to_hub,
-                    push_to_hub_token,
-                    host_name,
-                    epoch,
-                    batch_size
-                ):
-
-                    dataset_path = None
-                    project = connect_project(host_name, token, project_id)
-
-                    if dataset_version and dataset_id and project:
-                        dataset_path = os.path.join(
-                            clone_dir, f"datasets/{dataset_version}"
-                        )
-
-                        if not os.path.exists(dataset_path):
-                            data_path = os.path.join(clone_dir, "data_zip")
-                            os.makedirs(data_path, exist_ok=True)
-
-                            dataset_name = download_dataset(project, dataset_id, data_path)
-                            print(dataset_name)
-                            if dataset_name:
-                                data_zip_dir = os.path.join(data_path, dataset_name)
-
-                                with zipfile.ZipFile(data_zip_dir, "r") as zip_ref:
-                                    zip_ref.extractall(dataset_path)
-
-                                extracted_files = os.listdir(dataset_path)
-                                zip_files = [
-                                    f for f in extracted_files if f.endswith(".zip")
-                                ]
-
-                                if len(zip_files) == 1:
-                                    inner_zip_path = os.path.join(
-                                        dataset_path, zip_files[0]
-                                    )
-                                    print(
-                                        f"🔁 Found inner zip file: {inner_zip_path}, extracting..."
-                                    )
-                                    with zipfile.ZipFile(inner_zip_path, "r") as inner_zip:
-                                        inner_zip.extractall(dataset_path)
-                                    os.remove(inner_zip_path)
-
-                        train_dir = os.path.join(dataset_path, "train/train_manifest.json")
-                        validation_dir = os.path.join(dataset_path, "validation/validation_manifest.json")
-                    
-                    else:
-                        url = "https://data.keithito.com/data/speech/LJSpeech-1.1.tar.bz2"
-                        filename = "LJSpeech-1.1.tar.bz2"
-
-                        response = requests.get(url, stream=True)
-                        total_size = int(response.headers.get('content-length', 0))
-                        block_size = 1024  # 1 Kibibyte
-
-                        with open(filename, 'wb') as file, tqdm(
-                            desc=filename,
-                            total=total_size,
-                            unit='iB',
-                            unit_scale=True,
-                            unit_divisor=1024,
-                        ) as bar:
-                            for data in response.iter_content(block_size):
-                                file.write(data)
-                                bar.update(len(data))
-                        
-                        with tarfile.open("LJSpeech-1.1.tar.bz2", "r:bz2") as tar:
-                            tar.extractall("LJSpeech-1.1")
-                        
-                        target_dir = "Data"
-                        wavs_src = os.path.join("LJSpeech-1.1", "LJSpeech-1.1", "wavs")
-                        wavs_dst = os.path.join(target_dir, "wavs")
-
-                        os.makedirs(target_dir, exist_ok=True)
-
-                        # Di chuyển thư mục wavs
-                        if os.path.exists(wavs_dst):
-                            shutil.rmtree(wavs_dst)
-                        
-                        logger.info(f"Đang di chuyển thư mục wavs từ {wavs_src} đến {wavs_dst}")
-                        shutil.move(wavs_src, wavs_dst)
-                        logger.info(f"Đã di chuyển thư mục wavs từ {wavs_src} đến {wavs_dst}")
-
-
-                    make_dir = os.path.join(os.getcwd(), "checkpoint")
-                    os.makedirs(make_dir, exist_ok=True)
-                    # subprocess.run(
-                    #     ("whereis accelerate"),
-                    #     shell=True,
-                    # )
-                    config_path = "Configs/config_ft.yml"
-                    config = yaml.safe_load(open(config_path))
-
-                    logger.info("===Train===")
-
-                    config['batch_size'] = batch_size
-                    config['max_len'] = 100 # not enough RAM
-                    config['loss_params']['joint_epoch'] = 110 
-                    config['epochs'] = epoch
-
-                    logger.info(f"Config: {config}")
-                    try:
-                        subprocess.run([
-                            "venv/bin/python", "train_finetune.py",
-                            "--config_path", "Configs/config_ft.yml"
-                        ], check=True)
-                    except Exception as e:
-                        logger.error(f"Lỗi khi train model: {e}")
-
-                    user = whoami(token=push_to_hub_token)['name']
-                    repo_id = f"{user}/{hf_model_id}"
-
-                    # Nếu repo chưa tồn tại, tạo mới
-                    create_repo(repo_id=repo_id, token=push_to_hub_token, exist_ok=True)
-
-                    # ✅ Upload checkpoint (đặt tên chuẩn theo Transformers nếu có thể)
-                    upload_folder(
-                        folder_path=make_dir,
-                        path_in_repo="checkpoint",
-                        repo_id=repo_id,
-                        token=push_to_hub_token,
-                        commit_message="Upload fine-tuned checkpoint"
-                    )
-
-                    yaml_metadata = (
-                        "---\n"
-                        "license: apache-2.0\n"
-                        "language: en\n"
-                        "tags:\n"
-                        "  - speech\n"
-                        "  - translation\n"
-                        f"model_name: {hf_model_id}\n"
-                        "---\n\n"
-                    )
-
-                    # Nội dung phần mô tả
-                    description = (
-                        "# Model Overview\n\n"
-                        "This model was trained/fine-tuned for speech translation tasks. "
-                        "It is based on a pretrained backbone and optimized using custom datasets.\n\n"
-                    )
-
-                    # Nội dung phần trích dẫn
-                    citations = (
-                        "## Citations\n\n"
-                        "This model was fine-tuned using custom data and training scripts.\n\n"
-                        "© 2025 YourTeamName. All rights reserved.\n"
-                    )
-
-                    # Tạo nội dung README
-                    readme_content = yaml_metadata + description + citations
-
-                    # Ghi ra file README.md
-                    readme_path = "README.md"
-                    with open(readme_path, "w", encoding="utf-8") as f:
-                        f.write(readme_content)
-
-                    # Upload lên Hugging Face Hub
-                    upload_file(
-                        path_or_fileobj=readme_path,
-                        path_in_repo="README.md",
-                        repo_id=repo_id,
-                        token=push_to_hub_token,
-                        commit_message="Upload new README.md"
-                    )
-
-                    print("✅ Đã upload README.md và checkpoint lên Hugging Face Hub!")
-
-                    CHANNEL_STATUS[channel_name]["status"] = "done"
-                    output_dir = "./data/checkpoint"
-                    print(push_to_hub)
-                    if push_to_hub:
-                        import datetime
-
-                        output_dir = "./data/checkpoint"
-                        now = datetime.datetime.now()
-                        date_str = now.strftime("%Y%m%d")
-                        time_str = now.strftime("%H%M%S")
-                        version = f"{date_str}-{time_str}"
-
-                        upload_checkpoint(project, version, output_dir)
-
-                train_thread = threading.Thread(
-                    target=func_train_model,
-                    args=(
-                        clone_dir,
-                        project_id,
-                        token,
-                        checkpoint_version,
-                        checkpoint_id,
-                        dataset_version,
-                        dataset_id,
-                        model_id,
-                        world_size,
-                        rank,
-                        master_add,
-                        master_port,
-                        prompt,
-                        absolute_path,
-                        channel_log,
-                        hf_model_id,
-                        push_to_hub,
-                        push_to_hub_token,
-                        host_name,
-                        epoch,
-                        batch_size
-                    ),
-                )
-                train_thread.start()
-
-                return {
-                    "message": "train completed successfully",
-                    "channel_name": channel_name,
-                }
-            except Exception as e:
-                return {"message": f"train failed: {e}"}
+            return {
+                "message": "training feature is being developed",
+            }
 
         elif command.lower() == "tensorboard":
             def run_tensorboard():
@@ -393,101 +85,125 @@ class MyModel(AIxBlockMLBase):
         #     return {"Share_url": link}
           
         elif command.lower() == "predict":
-            data = kwargs.get("audio",None)
+            model_id = kwargs.get("model_id", "Wan-AI/Wan2.1-T2V-1.3B-Diffusers")
             prompt = kwargs.get("prompt", "")
-            model_id = kwargs.get("model_id", "")
-            diffusion_steps = kwargs.get("diffusion_steps", 10)
-            token = kwargs.get("token")
-            alpha = kwargs.get("alpha", 0.3)
-            beta = kwargs.get("beta", 0.7)
-            embscale = kwargs.get("embscale", 1)
-            
-            def decode_base64_to_audio(base64_audio, output_file="output.wav"):
-                # Giải mã Base64 thành nhị phân
-                import base64
-                # import os  
-                file_path = os.path.join(os.path.dirname(__file__), output_file)
-                audio_data = base64.b64decode(base64_audio)
-                
-                # Ghi dữ liệu nhị phân vào file âm thanh
-                with open(file_path, "wb") as audio_file:
-                    audio_file.write(audio_data)
-                return file_path
-
-            def download_audio(audio_url, save_path):
-                # Tạo request để tải video từ URL
-                response = requests.get(audio_url, stream=True)
-                
-                # Kiểm tra nếu request thành công
-                if response.status_code == 200:
-                    with open(save_path, 'wb') as audio_file:
-                        for chunk in response.iter_content(chunk_size=1024):
-                            if chunk:
-                                audio_file.write(chunk)
-                    print(f"audio has been downloaded and saved to {save_path}")
-                    return save_path  # Trả về đường dẫn đến video đã tải về
-                else:
-                    print(f"Failed to download audio. Status code: {response.status_code}")
-                    return None
-
-            # Thay audio_url bằng URL audio thật của bạn
-            if data: 
-                if "http://" in data or "https://" in data:
-                    input_audio= download_audio(data,"audio.wav")
-                else:
-                    input_audio= decode_base64_to_audio(base64_audio=data)
-            else:
-                input_audio = None
-            
-            def wav_to_base64(wav_tensor, sample_rate=24000):
-                # Nếu là PyTorch tensor, chuyển sang NumPy
-                if isinstance(wav_tensor, torch.Tensor):
-                    wav_tensor = wav_tensor.squeeze().cpu().numpy()
-                
-                # Chuẩn hóa về [-1, 1] nếu cần
-                if wav_tensor.dtype != np.int16:
-                    wav_tensor = np.clip(wav_tensor, -1, 1)
-                    wav_tensor = (wav_tensor * 32767).astype(np.int16)
-
-                # Ghi vào buffer
-                buffer = io.BytesIO()
-                write(buffer, sample_rate, wav_tensor)
-                buffer.seek(0)
-
-                # Encode base64
-                audio_base64 = base64.b64encode(buffer.read()).decode('utf-8')
-                return audio_base64
+            negative_prompt = kwargs.get("negative_prompt", "lowres, text, error, worst quality, low quality")
+            lora_id = kwargs.get("lora_id", None)
+            lora_weight_name = kwargs.get("lora_weight_name", None)
+            lora_scale = kwargs.get("lora_scale", 1.0)
+            scheduler_type = kwargs.get("scheduler_type", "UniPCMultistepScheduler")
+            flow_shift = kwargs.get("flow_shift", 3.0)
+            height = kwargs.get("height", 480)
+            width = kwargs.get("width", 832)
+            num_frames = kwargs.get("num_frames", 48)
+            guidance_scale = kwargs.get("guidance_scale", 5.0)
+            num_inference_steps = kwargs.get("num_inference_steps", 24)
+            seed = kwargs.get("seed", -1)
+            negative_prompt = kwargs.get("negative_prompt", "lowres, text, error, worst quality, low quality")
+            output_fps = kwargs.get("output_fps", 12)
+            base_url = kwargs.get("base_url", "")
+            print("Predicting...")
 
             predictions = []
-            base64_output = []
-            generated_url=""
-            generated_text=""
-
-            if input_audio:
-                refs = styletts2importable.compute_style(input_audio)
-                wav = styletts2importable.inference(prompt, refs, alpha=alpha, beta=beta, diffusion_steps=diffusion_steps, embedding_scale=embscale)
+            # Set seed for reproducibility
+            if seed == -1 or seed is None or seed == "":
+                seed = random.randint(0, 2147483647)
             else:
-                noise = torch.randn(1,1,256).to('cuda' if torch.cuda.is_available() else 'cpu')
-                wav = ljspeechimportable.inference(prompt, noise, diffusion_steps=diffusion_steps, embedding_scale=1)
+                seed = int(seed)
+            # Set the seed
+            torch.manual_seed(seed)
+            # Load model
+            text_encoder = UMT5EncoderModel.from_pretrained(model_id, subfolder="text_encoder", torch_dtype=torch.bfloat16)
+            vae = AutoModel.from_pretrained("Wan-AI/Wan2.1-T2V-1.3B-Diffusers", subfolder="vae", torch_dtype=torch.float32)
+            transformer = AutoModel.from_pretrained("Wan-AI/Wan2.1-T2V-1.3B-Diffusers", subfolder="transformer", torch_dtype=torch.bfloat16)
+            # group-offloading
+            onload_device = torch.device("cuda")
+            offload_device = torch.device("cpu")
 
-            audio_base64 = wav_to_base64(wav)
+            apply_group_offloading(text_encoder,
+                onload_device=onload_device,
+                offload_device=offload_device,
+                offload_type="block_level",
+                num_blocks_per_group=4
+            )
+
+            transformer.enable_group_offload(
+                onload_device=onload_device,
+                offload_device=offload_device,
+                offload_type="leaf_level",
+                use_stream=True
+            )
+
+            pipeline = WanPipeline.from_pretrained(
+                "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+                vae=vae,
+                transformer=transformer,
+                text_encoder=text_encoder,
+                torch_dtype=torch.bfloat16
+            )
+
+            # Set scheduler
+            if scheduler_type == "UniPCMultistepScheduler":
+                pipeline.scheduler = UniPCMultistepScheduler.from_config(
+                    pipeline.scheduler.config,
+                    flow_shift=flow_shift
+                )
+            else:
+                pipeline.scheduler = FlowMatchEulerDiscreteScheduler(shift=flow_shift)
+
+            # Move to GPU
+            pipeline.to("cuda")
+    
+            # Generate video
+            # Load LoRA weights if provided
+            if lora_id and lora_id.strip():
+                try:
+                    # If a specific weight name is provided, use it
+                    if lora_weight_name and lora_weight_name.strip():
+                        pipeline.load_lora_weights(lora_id, weight_name=lora_weight_name)
+                    else:
+                        pipeline.load_lora_weights(lora_id)
+                    
+                    # Set lora scale if applicable
+                    if hasattr(pipeline, "set_adapters_scale") and lora_scale is not None:
+                        pipeline.set_adapters_scale(lora_scale)
+                except ValueError as e:
+                    # Return informative error if there are multiple safetensors and no weight name
+                    if "more than one weights file" in str(e):
+                        return f"Error: The repository '{lora_id}' contains multiple safetensors files. Please specify a weight name using the 'LoRA Weight Name' field.", seed
+                    else:
+                        return f"Error loading LoRA weights: {str(e)}", seed
+            
+            # Generate video
+            with torch.no_grad():
+                output = pipeline(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    height=height,
+                    width=width,
+                    num_frames=num_frames,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps
+                ).frames[0]
+            
+            # Export to video
+            filename = f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+            export_to_video(output, output_video_path=f"./{filename}.mp4", fps=output_fps)
+            download_url = f"{base_url}/downloads?path={filename}"
             predictions.append({
                 'result': [{
-                    'from_name': "generated_text",
-                    'to_name': "text_output", #audio
-                    'type': 'textarea',
+                    'from_name': "text",
+                    'to_name': "video", #audio
                     'value': {
-                        'data': audio_base64,
-                        "url": generated_url, 
-                        'text': audio_base64
+                        "download_url": download_url, 
                     }
                 }],
-                'model_version': ""
+                'model_version': model_id
             })
             print(predictions)
+            print("predict completed successfully")
             return {"message": "predict completed successfully", "result": predictions}
 
-        
         elif command.lower() == "prompt_sample":
                 task = kwargs.get("task", "")
                 if task == "question-answering":
@@ -559,7 +275,13 @@ class MyModel(AIxBlockMLBase):
     @mcp.tool()
     def model(self, **kwargs):
         from gradio_demo import demo
-        gradio_app, local_url, share_url = demo.launch(share=True, quiet=True, prevent_thread_lock=True, server_name='0.0.0.0',show_error=True)
+        gradio_app, local_url, share_url = demo.launch(
+            share=True, 
+            quiet=True, 
+            prevent_thread_lock=True, 
+            server_name='0.0.0.0',
+            show_error=True
+        )
         return {"share_url": share_url, 'local_url': local_url}
     
     @mcp.tool()

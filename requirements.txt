@@ -50,7 +50,6 @@ ftfy>=6.1.3
 wheel==0.44.0
 matplotlib
 gradio_toggle==2.0.2
-# torchao
 huggingface_hub[hf_xet]
 apscheduler
 fastapi
@@ -60,7 +59,9 @@ spaces
 torch==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu126
 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
-git+https://github.com/huggingface/diffusers.git#egg=diffusers
+torchao --index-url https://download.pytorch.org/whl/nightly/cpu
+diffusers>=0.28.2
 controlnet-aux
 protobuf
 modelscope
+python-dotenv
